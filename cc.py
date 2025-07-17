@@ -15,7 +15,6 @@ import ssl
 import datetime
 import os
 from collections import defaultdict
-import threading
 
 # 全局统计变量
 stats_lock = threading.Lock()
