@@ -17,10 +17,11 @@ import os
 from collections import defaultdict
 import json
 
-
-DEBUG_MODE = True   # 开启调试输出
-DEBUG_SAMPLE_RATE = 1000  # 调试信息每1000次请求打印一次
-SAMPLE_RATE = 10    # 更频繁的统计采样
+DEBUG_MODE = False  # 关闭调试输出
+SAMPLE_RATE = 100   # 正常采样率
+# DEBUG_MODE = True   # 开启调试输出
+# DEBUG_SAMPLE_RATE = 1000  # 调试信息每1000次请求打印一次
+# SAMPLE_RATE = 10    # 更频繁的统计采样
 
 # FlareSolverr配置（添加到全局统计变量后）
 FLARESOLVERR_URL = "http://localhost:8191/v1"
