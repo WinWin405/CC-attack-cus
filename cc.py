@@ -983,13 +983,13 @@ def check_list(socks_file):
 	temp = open(socks_file).readlines()
 	temp_list = []
 	for i in temp:
-		if i not in temp_list:
-			if ':' in i and '#' not in i:
-				try:
-					socket.inet_pton(socket.AF_INET,i.strip().split(":")[0])#check valid ip v4
-					temp_list.append(i)
-				except:
-					pass
+		# if i not in temp_list:
+		if ':' in i and '#' not in i:
+			try:
+				socket.inet_pton(socket.AF_INET,i.strip().split(":")[0])#check valid ip v4
+				temp_list.append(i)
+			except:
+				pass
 	rfile = open(socks_file, "wb")
 	for i in list(temp_list):
 		rfile.write(bytes(i,encoding='utf-8'))
