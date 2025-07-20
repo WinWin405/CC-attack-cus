@@ -601,7 +601,7 @@ def InputOption(question,options,default):
 	return ans
 
 def cc(event, proxy_type):
-    global request_count # 我们需要直接操作 request_count
+    global request_count, success_count, error_count, status_codes
     header = GenReqHeader("get")
     # 确保请求头是 Keep-Alive，如果之前改过，要改回来
     header = header.replace("Connection: close", "Connection: Keep-Alive") 
