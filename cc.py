@@ -627,7 +627,7 @@ def cc(event, proxy_type):
             s.settimeout(10)
             s.connect((str(target), int(port)))
             
-            if protocol == "httpshttps": # 修正: 应该是 "https"
+            if protocol == "https": # 修正: 应该是 "https"
                 ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
                 ctx.check_hostname = False
                 ctx.verify_mode = ssl.CERT_NONE
