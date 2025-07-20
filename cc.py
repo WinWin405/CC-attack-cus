@@ -614,7 +614,7 @@ def cc(event, proxy_type):
 
     while True:
         s = None
-	sent_count_in_batch = 0
+        sent_count_in_batch = 0
         try:
             # 1. 建立一个长连接
             s = socks.socksocket()
