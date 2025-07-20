@@ -22,7 +22,7 @@ import json
 DEBUG_MODE = True   # 开启调试输出
 DEBUG_SAMPLE_RATE = 1000  # 调试信息每1000次请求打印一次
 # SAMPLE_RATE = 10    # 更频繁的统计采样
-BATCH_SIZE = 200  # 每个连接批量发送50个请求，你可以调整这个值
+BATCH_SIZE = 300  # 每个连接批量发送50个请求，你可以调整这个值
 
 # FlareSolverr配置（添加到全局统计变量后）
 FLARESOLVERR_URL = "http://localhost:8191/v1"
